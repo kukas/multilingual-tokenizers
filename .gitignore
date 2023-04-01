@@ -1,0 +1,7 @@
+data/
+job_outputs/
+tokenizers/
+
+.ipynb_checkpoints/
+.vscode/
+__pycache__/
