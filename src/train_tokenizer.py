@@ -7,7 +7,6 @@ from subprocess import check_output
 from timeit import default_timer as timer
 import resource
 
-000000
 import numpy as np
 import sentencepiece as spm
 
@@ -44,14 +43,19 @@ def get_output_path(
     model_type,
     character_coverage,
     max_num_sentences,
+    max_sentencepiece_length,
 ):
     if not max_num_sentences:
-        sentences = ""
+        additional = ""
     else:
-        sentences = f"_{max_num_sentences}sentences"
+        additional = f"_{max_num_sentences}sentences"
+
+    if max_sentencepiece_length != 16:
+        additional += f"_{max_sentencepiece_length}max_sentencepiece_length"
+
     output_path = os.path.join(
         output_dir,
-        f"{output_prefix}_{model_type}_{vocab_size}vocab_{character_coverage}coverage{sentences}",
+        f"{output_prefix}_{model_type}_{vocab_size}vocab_{character_coverage}coverage{additional}",
     )
 
     return output_path
@@ -181,6 +185,7 @@ def train_original_sentencepiece(
     character_coverage,
     model_type,
     input_sentence_size,
+    max_sentencepiece_length,
 ):
     start_time = timer()
     logging.info(
@@ -196,6 +201,7 @@ def train_original_sentencepiece(
         train_extremely_large_corpus=True,
         shuffle_input_sentence=True,
         input_sentence_size=input_sentence_size,
+        max_sentencepiece_length=max_sentencepiece_length,
     )
     logging.info(f"Training took {timer() - start_time:.2f} seconds")
     logging.info(
@@ -211,6 +217,7 @@ def main(args):
         args.model_type,
         args.character_coverage,
         args.max_num_sentences,
+        args.max_sentencepiece_length,
     )
 
     sentencepiece_trained = not args.huggingface and os.path.exists(
@@ -230,6 +237,15 @@ def main(args):
     os.makedirs(output_path, exist_ok=True)
 
     if args.huggingface:
+        if args.character_coverage:
+            raise ValueError(
+                "character_coverage is not supported for huggingface tokenizer"
+            )
+        if args.max_sentencepiece_length:
+            raise ValueError(
+                "max_sentencepiece_length is not supported for huggingface tokenizer"
+            )
+
         logging.info("Training huggingface sentencepiece")
         train_huggingface_sentencepiece(
             args.input,
@@ -249,6 +265,7 @@ def main(args):
             character_coverage=args.character_coverage,
             model_type=args.model_type,
             input_sentence_size=args.max_num_sentences,
+            max_sentencepiece_length=args.max_sentencepiece_length,
         )
 
     save_script(output_path)
@@ -268,6 +285,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--huggingface", default=False, action=argparse.BooleanOptionalAction
     )
+    parser.add_argument("--max_sentencepiece_length", type=int, default=16)
 
     args = parser.parse_args()
     main(args)
