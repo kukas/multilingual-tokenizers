@@ -1,4 +1,23 @@
 import math
+import sentencepiece as spm
+
+
+class SpTokenizer:
+    def __init__(self, model_file=None, model_proto=None):
+        if model_file is None and model_proto is None:
+            raise ValueError("Either model_file or model_proto must be provided")
+
+        self.sp_model = spm.SentencePieceProcessor(
+            model_file=model_file, model_proto=model_proto
+        )
+        self.vocab = [self.sp_model.IdToPiece(idx) for idx in range(len(self.sp_model))]
+
+    def encode(self, text, **kwargs):
+        return self.sp_model.encode(text, **kwargs)
+
+
+def get_vocab_from_sp_model(sp):
+    return [sp.id_to_piece(i) for i in range(len(sp))]
 
 
 # format function for the numbers
@@ -27,15 +46,68 @@ def read_vocab(vocab_file):
     return first_column
 
 
-def load_lines(path, max_lines=None):
+def load_lines(path, max_lines=None, filter_empty=True):
     lines = []
     with open(path) as f:
         for i, line in enumerate(f):
-            if max_lines is not None and i >= max_lines:
+            if max_lines is not None and len(lines) >= max_lines:
                 break
-            lines.append(line.rstrip())
+            line = line.rstrip()
+            if filter_empty and not line:
+                continue
+            lines.append(line)
 
     return lines
+
+
+def load_documents(path, max_documents=None):
+    docs = []
+    with open(path) as f:
+        lines = []
+        for i, line in enumerate(f):
+            if max_documents is not None and len(docs) >= max_documents:
+                break
+
+            if line == "\n":
+                lines = " ".join(lines)
+                docs.append(lines)
+                lines = []
+            else:
+                lines.append(line.rstrip())
+
+    return docs
+
+
+import lzma
+
+
+def open_lzma(path, max_docs):
+    docs = []
+    with lzma.open(path, mode="rt") as f:
+        doc = []
+        for line in f:
+            if line == "\n":
+                docs.append(doc)
+                doc = []
+            else:
+                doc.append(line.strip())
+            if len(docs) >= max_docs:
+                break
+    return docs
+
+
+# def load_documents(path, max_lines=None, filter_empty=True):
+#     lines = []
+#     with open(path) as f:
+#         for i, line in enumerate(f):
+#             if max_lines is not None and len(lines) >= max_lines:
+#                 break
+#             line = line.rstrip()
+#             if filter_empty and len(line.strip()) == 0:
+#                 continue
+#             lines.append(line)
+
+#     return lines
 
 
 import numpy as np
@@ -43,10 +115,6 @@ import nltk
 
 nltk.download("punkt")
 from nltk.tokenize import word_tokenize
-
-
-def get_vocab_from_sp_model(sp):
-    return [sp.id_to_piece(i) for i in range(len(sp))]
 
 
 def compute_sorted_token_freqs(tokenized_text, vocabulary):
@@ -63,7 +131,7 @@ def compute_sorted_token_freqs(tokenized_text, vocabulary):
 
 
 def compute_freqs(tokenized_text, vocab_size, return_probs=False):
-    freqs = np.zeros(vocab_size)
+    freqs = np.zeros(vocab_size, dtype=np.int32)
     for sentence in tokenized_text:
         for token in sentence:
             freqs[token] += 1
@@ -72,6 +140,14 @@ def compute_freqs(tokenized_text, vocab_size, return_probs=False):
         freqs = freqs / freqs.sum()
 
     return freqs
+
+
+from collections import Counter
+
+
+def compute_counters(tokenized_text):
+    counter = Counter(tokenized_text)
+    return counter
 
 
 def compute_probs(freqs):
@@ -208,3 +284,108 @@ def compute_jsd(freqs1, freqs2):
     probs1 = compute_probs(freqs1)
     probs2 = compute_probs(freqs2)
     return jensenshannon(probs1, probs2)
+
+
+# def compute_alp_zheng(lines, tokenizer):
+#     all_tokens = 0
+#     words_list = tokenizer.vocab
+#     words = {}
+#     for i, word in enumerate(words_list):
+#         words[i] = 0
+
+#     tokenized_lines = []
+#     for line in lines:
+#         line = line.strip()
+#         token_ids = tokenizer.tokenize(line)
+#         all_tokens += len(token_ids)
+#         for idx in token_ids:
+#             words[idx] += 1
+#         tokenized_lines.append(token_ids)
+#     for idx in words.keys():
+#         words[idx] /= all_tokens
+#     probs = []
+#     for token_ids in tokenized_lines:
+#         p = 0.0
+#         for idx in token_ids:
+#             p += math.log(words[idx])
+#         probs.append(p)
+
+#     return np.mean(probs)
+# Note: I checked it to be equivalent to compute_average_log_probability
+
+
+import os
+from glob import glob
+from sentencepiece import sentencepiece_model_pb2 as model
+from collections import defaultdict
+from copy import deepcopy
+
+
+def merge_tokenizers(paths, log_scores=True):
+    tokens_scores = defaultdict(list)
+
+    # collect all tokens and their scores
+    for path in paths:
+        m = model.ModelProto()
+        m.ParseFromString(open(path, "rb").read())
+        scores = []
+        for piece in m.pieces:
+            # skip special tokens
+            if piece.type != 1:
+                continue
+            tokens_scores[piece.piece].append(piece.score)
+
+    # normalize the scores
+    for token, scores in tokens_scores.items():
+        if log_scores:
+            if len(scores) != len(paths):
+                scores = scores + [-np.inf] * (len(paths) - len(scores))
+            tokens_scores[token] = np.exp(scores).sum() / len(paths)
+            tokens_scores[token] = np.log(tokens_scores[token])
+        else:
+            scores = scores + [-len(tokens_scores)] * (len(paths) - len(scores))
+            tokens_scores[token] = sum(scores) / len(paths)
+
+    tokens_scores = dict(
+        sorted(tokens_scores.items(), key=lambda item: item[1], reverse=True)
+    )
+
+    # create a new tokenizer based on one of the old tokenizers
+    m = model.ModelProto()
+    m.ParseFromString(open(paths[0], "rb").read())
+    old_pieces = deepcopy(m.pieces)
+    m.ClearField("pieces")
+
+    for piece in old_pieces:
+        if piece.type != 1:
+            m.pieces.append(piece)
+
+    for token, score in tokens_scores.items():
+        piece = model.ModelProto().SentencePiece()
+        piece.piece = token
+        piece.score = score
+        piece.type = 1
+        m.pieces.append(piece)
+    m.trainer_spec.vocab_size = len(m.pieces)
+
+    return m
+
+
+def save_tokenizer(m, output_dir):
+    os.makedirs(output_dir, exist_ok=True)
+    print("Saving tokenizer to", output_dir)
+    with open(os.path.join(output_dir, "m.model"), "wb") as f:
+        f.write(m.SerializeToString())
+    with open(os.path.join(output_dir, "m.vocab"), "w") as f:
+        for piece in m.pieces:
+            f.write(piece.piece + "\t" + str(piece.score) + "\n")
+
+
+def trim_vocab(m, vocab_size):
+    assert vocab_size <= len(m.pieces)
+    orig_pieces = deepcopy(m.pieces)
+    m.ClearField("pieces")
+    for i in range(vocab_size):
+        m.pieces.append(orig_pieces[i])
+    m.trainer_spec.vocab_size = len(m.pieces)
+    return m
