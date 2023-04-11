@@ -232,7 +232,7 @@ def main(args):
             logging.info("Overwriting...")
         else:
             logging.info("Exiting...")
-            sys.exit(1)
+            sys.exit(0)
 
     os.makedirs(output_path, exist_ok=True)
 
