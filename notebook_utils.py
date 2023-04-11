@@ -50,7 +50,7 @@ def load_lines(path, max_lines=None, filter_empty=True):
     lines = []
     with open(path) as f:
         for i, line in enumerate(f):
-            if max_lines is not None and len(lines) >= max_lines:
+            if max_lines is not None and max_lines != 0 and len(lines) >= max_lines:
                 break
             line = line.rstrip()
             if filter_empty and not line:
@@ -65,11 +65,36 @@ def load_documents(path, max_documents=None):
     with open(path) as f:
         lines = []
         for i, line in enumerate(f):
-            if max_documents is not None and len(docs) >= max_documents:
+            if (
+                max_documents is not None
+                and max_documents != 0
+                and len(docs) >= max_documents
+            ):
                 break
 
             if line == "\n":
                 lines = " ".join(lines)
+                docs.append(lines)
+                lines = []
+            else:
+                lines.append(line.rstrip())
+
+    return docs
+
+
+def load_document_lines(path, max_documents=None):
+    docs = []
+    with open(path) as f:
+        lines = []
+        for i, line in enumerate(f):
+            if (
+                max_documents is not None
+                and max_documents != 0
+                and len(docs) >= max_documents
+            ):
+                break
+
+            if line == "\n":
                 docs.append(lines)
                 lines = []
             else:
@@ -113,9 +138,6 @@ def open_lzma(path, max_docs):
 import numpy as np
 import nltk
 
-nltk.download("punkt")
-from nltk.tokenize import word_tokenize
-
 
 def compute_sorted_token_freqs(tokenized_text, vocabulary):
     # returns a list of tuples (freq, token)
@@ -146,8 +168,30 @@ from collections import Counter
 
 
 def compute_counters(tokenized_text):
-    counter = Counter(tokenized_text)
-    return counter
+    counters = []
+    for line in tokenized_text:
+        counter = Counter(line)
+        counters.append(dict(counter))
+
+    return counters
+
+
+# def compute_counters_docs(tokenized_docs):
+#     counters = []
+#     for lines in tokenized_docs:
+#         counter = Counter()
+#         for line in lines:
+#             counter.update(line)
+#         counters.append(dict(counter))
+
+#     return counters
+
+
+def counter_to_freqs(counter, vocab_size):
+    freqs = np.zeros(vocab_size, dtype=np.int32)
+    for token, freq in counter.items():
+        freqs[token] += freq
+    return freqs
 
 
 def compute_probs(freqs):
@@ -191,6 +235,9 @@ def compute_average_rank(probs):
 
 
 def word_tokenize_list(lines, language="english", preserve_line=False):
+    nltk.download("punkt")
+    from nltk.tokenize import word_tokenize
+
     return [
         word_tokenize(line, language=language, preserve_line=False) for line in lines
     ]
@@ -321,13 +368,12 @@ from collections import defaultdict
 from copy import deepcopy
 
 
-def merge_tokenizers(paths, log_scores=True):
+def merge_tokenizer_protos(model_protos, log_scores=True):
     tokens_scores = defaultdict(list)
+    num_tokenizers = len(model_protos)
 
     # collect all tokens and their scores
-    for path in paths:
-        m = model.ModelProto()
-        m.ParseFromString(open(path, "rb").read())
+    for m in model_protos:
         scores = []
         for piece in m.pieces:
             # skip special tokens
@@ -338,21 +384,20 @@ def merge_tokenizers(paths, log_scores=True):
     # normalize the scores
     for token, scores in tokens_scores.items():
         if log_scores:
-            if len(scores) != len(paths):
-                scores = scores + [-np.inf] * (len(paths) - len(scores))
-            tokens_scores[token] = np.exp(scores).sum() / len(paths)
+            if len(scores) != num_tokenizers:
+                scores = scores + [-np.inf] * (num_tokenizers - len(scores))
+            tokens_scores[token] = np.exp(scores).sum() / num_tokenizers
             tokens_scores[token] = np.log(tokens_scores[token])
         else:
-            scores = scores + [-len(tokens_scores)] * (len(paths) - len(scores))
-            tokens_scores[token] = sum(scores) / len(paths)
+            scores = scores + [-len(tokens_scores)] * (num_tokenizers - len(scores))
+            tokens_scores[token] = sum(scores) / num_tokenizers
 
     tokens_scores = dict(
         sorted(tokens_scores.items(), key=lambda item: item[1], reverse=True)
     )
 
     # create a new tokenizer based on one of the old tokenizers
-    m = model.ModelProto()
-    m.ParseFromString(open(paths[0], "rb").read())
+    m = deepcopy(model_protos[0])
     old_pieces = deepcopy(m.pieces)
     m.ClearField("pieces")
 
@@ -369,6 +414,17 @@ def merge_tokenizers(paths, log_scores=True):
     m.trainer_spec.vocab_size = len(m.pieces)
 
     return m
+
+
+def merge_tokenizers(paths, log_scores=True):
+    protos = []
+    # collect all tokens and their scores
+    for path in paths:
+        m = model.ModelProto()
+        m.ParseFromString(open(path, "rb").read())
+        protos.append(m)
+
+    return merge_tokenizer_protos(protos, log_scores)
 
 
 def save_tokenizer(m, output_dir):
@@ -389,3 +445,21 @@ def trim_vocab(m, vocab_size):
         m.pieces.append(orig_pieces[i])
     m.trainer_spec.vocab_size = len(m.pieces)
     return m
+
+
+from functools import partial
+from multiprocessing import Pool
+
+
+def _map(func, key, value):
+    return (key, func(value))
+
+
+def parallel_dict_map(func, d, n_jobs=16):
+    with Pool(n_jobs) as p:
+        return dict(p.starmap(partial(_map, func), d.items()))
+
+
+def parallel_list_map(func, d, n_jobs=16):
+    with Pool(n_jobs) as p:
+        return list(p.map(func, d, chunksize=math.ceil(len(d) / n_jobs)))
