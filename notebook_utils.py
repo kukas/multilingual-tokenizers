@@ -37,12 +37,21 @@ def humanize(n, base=1000):
     return "{:.1f}{}".format(n / base ** (idx), names[idx])
 
 
-def read_vocab(vocab_file):
+def flatten(l):
+    return [item for sublist in l for item in sublist]
+
+
+def read_vocab(vocab_file, return_probs=False):
     with open(vocab_file) as tsv_file:
         first_column = []
+        second_column = []
 
         for line in tsv_file:
-            first_column.append(line.rsplit("\t", 1)[0])
+            fst, snd = line.rsplit("\t", 1)
+            first_column.append(fst)
+            second_column.append(float(snd))
+    if return_probs:
+        return first_column, second_column
     return first_column
 
 
@@ -318,6 +327,13 @@ def compute_F_at_95(sorted_freqs):
     return sorted_freqs[idx]
 
 
+def tokens_to_cover_95(sorted_freqs):
+    probs = compute_probs(sorted_freqs)
+    cumsum = np.cumsum(probs)
+    idx = np.where(cumsum > 0.95)[0][0]
+    return idx
+
+
 def compute_divergence_from_uniform(freqs):
     p_uniform = 1 / len(freqs)
     probs = compute_probs(freqs)
@@ -392,7 +408,7 @@ def merge_tokenizer_protos(model_protos, log_scores=True):
             scores = scores + [-len(tokens_scores)] * (num_tokenizers - len(scores))
             tokens_scores[token] = sum(scores) / num_tokenizers
 
-    tokens_scores = dict(
+    tokens_scores = list(
         sorted(tokens_scores.items(), key=lambda item: item[1], reverse=True)
     )
 
@@ -405,7 +421,7 @@ def merge_tokenizer_protos(model_protos, log_scores=True):
         if piece.type != 1:
             m.pieces.append(piece)
 
-    for token, score in tokens_scores.items():
+    for token, score in tokens_scores:
         piece = model.ModelProto().SentencePiece()
         piece.piece = token
         piece.score = score
@@ -427,12 +443,12 @@ def merge_tokenizers(paths, log_scores=True):
     return merge_tokenizer_protos(protos, log_scores)
 
 
-def save_tokenizer(m, output_dir):
+def save_tokenizer(m, output_dir, name="m"):
     os.makedirs(output_dir, exist_ok=True)
     print("Saving tokenizer to", output_dir)
-    with open(os.path.join(output_dir, "m.model"), "wb") as f:
+    with open(os.path.join(output_dir, f"{name}.model"), "wb") as f:
         f.write(m.SerializeToString())
-    with open(os.path.join(output_dir, "m.vocab"), "w") as f:
+    with open(os.path.join(output_dir, f"{name}.vocab"), "w") as f:
         for piece in m.pieces:
             f.write(piece.piece + "\t" + str(piece.score) + "\n")
 
@@ -463,3 +479,32 @@ def parallel_dict_map(func, d, n_jobs=16):
 def parallel_list_map(func, d, n_jobs=16):
     with Pool(n_jobs) as p:
         return list(p.map(func, d, chunksize=math.ceil(len(d) / n_jobs)))
+
+
+def create_tokenizer(tuple_pieces):
+    # tokens_scores = defaultdict(list)
+    # num_tokenizers = len(model_protos)
+
+    # create a new tokenizer based on one of the old tokenizers
+    # m = deepcopy(model_protos[0])
+    m = model.ModelProto()
+    # old_pieces = deepcopy(m.pieces)
+    # m.ClearField("pieces")
+
+    # for piece in old_pieces:
+    #     if piece.type != 1:
+    #         m.pieces.append(piece)
+
+    for token, score in tuple_pieces:
+        piece = model.ModelProto().SentencePiece()
+        piece.piece = token
+        piece.score = score
+        piece.type = 1
+        if token == "<unk>":
+            piece.type = 2
+        if token == "<s>" or token == "</s>":
+            piece.type = 3
+        m.pieces.append(piece)
+    m.trainer_spec.vocab_size = len(m.pieces)
+
+    return m

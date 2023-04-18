@@ -1,6 +1,7 @@
 data/
 job_outputs/
 tokenizers/
+processed/
 
 .ipynb_checkpoints/
 .vscode/
