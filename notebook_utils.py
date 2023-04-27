@@ -162,7 +162,8 @@ def compute_sorted_token_freqs(tokenized_text, vocabulary):
 
 
 def compute_freqs(tokenized_text, vocab_size, return_probs=False):
-    freqs = np.zeros(vocab_size, dtype=np.int32)
+    # freqs = np.zeros(vocab_size, dtype=np.int32)
+    freqs = [0] * vocab_size
     for sentence in tokenized_text:
         for token in sentence:
             freqs[token] += 1
@@ -327,8 +328,9 @@ def compute_F_at_95(sorted_freqs):
     return sorted_freqs[idx]
 
 
-def tokens_to_cover_95(sorted_freqs):
-    probs = compute_probs(sorted_freqs)
+def tokens_to_cover_95(probs):
+    assert np.isclose(np.sum(probs), 1)
+    probs = np.sort(probs)[::-1]
     cumsum = np.cumsum(probs)
     idx = np.where(cumsum > 0.95)[0][0]
     return idx

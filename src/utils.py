@@ -1,11 +1,12 @@
 import logging
 import os
 import sys
+import json
 
 logging.basicConfig(level=logging.INFO)
 
 
-def save_script(output_path):
+def save_script(output_path, args=None):
     """Save the script and arguments for reproducibility"""
 
     logging.info(f"Saving script and arguments at {output_path}")
@@ -21,6 +22,10 @@ def save_script(output_path):
 
     with open(os.path.join(output_path, script_name + "_args.txt"), "w") as log_file:
         log_file.writelines([arg + "\n" for arg in sys.argv])
+
+    if args is not None:
+        with open(os.path.join(output_path, script_name + "_args.json"), "w") as f:
+            json.dump(args.__dict__, f, indent=2)
 
 
 def get_output_path(
