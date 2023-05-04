@@ -2,6 +2,8 @@ import logging
 import os
 import sys
 import json
+from timeit import default_timer as timer
+import resource
 
 logging.basicConfig(level=logging.INFO)
 
@@ -60,3 +62,16 @@ def get_output_path(
     )
 
     return output_path
+
+
+class Timer:
+    def __init__(self):
+        self.last_time = timer()
+
+    def usage_and_time(self, message=""):
+        message = f"{message} Memory usage: {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024:.2f} MB, Time: {timer() - last_time:.2f} s"
+        self.last_time = timer()
+        return message
+
+
+timer = Timer()
