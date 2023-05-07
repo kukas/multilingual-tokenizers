@@ -49,6 +49,7 @@ from transformers import (
     TrainingArguments,
     is_torch_tpu_available,
     set_seed,
+    EarlyStoppingCallback,
 )
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
@@ -185,12 +186,14 @@ class DataTrainingArguments:
         },
     )
     train_file: Optional[str] = field(
-        default=None, metadata={"help": "The input training data file (a text file)."}
+        default=None,
+        metadata={"help": "The input training data file (a text file).", "nargs": "+"},
     )
     validation_file: Optional[str] = field(
         default=None,
         metadata={
-            "help": "An optional input evaluation data file to evaluate the perplexity on (a text file)."
+            "help": "An optional input evaluation data file to evaluate the perplexity on (a text file).",
+            "nargs": "+",
         },
     )
     overwrite_cache: bool = field(
@@ -276,19 +279,19 @@ class DataTrainingArguments:
             raise ValueError(
                 "Need either a dataset name or a training/validation file."
             )
-        else:
-            if self.train_file is not None:
-                extension = self.train_file.split(".")[-1]
-                if extension not in ["csv", "json", "txt"]:
-                    raise ValueError(
-                        "`train_file` should be a csv, a json or a txt file."
-                    )
-            if self.validation_file is not None:
-                extension = self.validation_file.split(".")[-1]
-                if extension not in ["csv", "json", "txt"]:
-                    raise ValueError(
-                        "`validation_file` should be a csv, a json or a txt file."
-                    )
+        # else:
+        #     if self.train_file is not None:
+        #         extension = self.train_file.split(".")[-1]
+        #         if extension not in ["csv", "json", "txt"]:
+        #             raise ValueError(
+        #                 "`train_file` should be a csv, a json or a txt file."
+        #             )
+        #     if self.validation_file is not None:
+        #         extension = self.validation_file.split(".")[-1]
+        #         if extension not in ["csv", "json", "txt"]:
+        #             raise ValueError(
+        #                 "`validation_file` should be a csv, a json or a txt file."
+        #             )
 
 
 def select_dataset_subset(
@@ -387,65 +390,73 @@ def main():
     #
     # In distributed training, the load_dataset function guarantee that only one local process can concurrently
     # download the dataset.
-    if data_args.dataset_name is not None:
-        # Downloading and loading a dataset from the hub.
-        raw_datasets = load_dataset(
-            data_args.dataset_name,
-            data_args.dataset_config_name,
-            cache_dir=model_args.cache_dir,
-            use_auth_token=True if model_args.use_auth_token else None,
-            streaming=data_args.streaming,
-        )
-        if "validation" not in raw_datasets.keys():
-            raw_datasets["validation"] = load_dataset(
-                data_args.dataset_name,
-                data_args.dataset_config_name,
-                split=f"train[:{data_args.validation_split_percentage}%]",
-                cache_dir=model_args.cache_dir,
-                use_auth_token=True if model_args.use_auth_token else None,
-                streaming=data_args.streaming,
-            )
-            raw_datasets["train"] = load_dataset(
-                data_args.dataset_name,
-                data_args.dataset_config_name,
-                split=f"train[{data_args.validation_split_percentage}%:]",
-                cache_dir=model_args.cache_dir,
-                use_auth_token=True if model_args.use_auth_token else None,
-                streaming=data_args.streaming,
-            )
-    else:
-        data_files = {}
-        if data_args.train_file is not None:
-            data_files["train"] = data_args.train_file
-            extension = data_args.train_file.split(".")[-1]
-        if data_args.validation_file is not None:
-            data_files["validation"] = data_args.validation_file
-            extension = data_args.validation_file.split(".")[-1]
-        if extension == "txt":
-            extension = "text"
-        raw_datasets = load_dataset(
-            extension,
-            data_files=data_files,
-            cache_dir=model_args.cache_dir,
-            use_auth_token=True if model_args.use_auth_token else None,
-        )
+    # if data_args.dataset_name is not None:
+    #     # Downloading and loading a dataset from the hub.
+    #     raw_datasets = load_dataset(
+    #         data_args.dataset_name,
+    #         data_args.dataset_config_name,
+    #         cache_dir=model_args.cache_dir,
+    #         use_auth_token=True if model_args.use_auth_token else None,
+    #         streaming=data_args.streaming,
+    #     )
+    #     if "validation" not in raw_datasets.keys():
+    #         raw_datasets["validation"] = load_dataset(
+    #             data_args.dataset_name,
+    #             data_args.dataset_config_name,
+    #             split=f"train[:{data_args.validation_split_percentage}%]",
+    #             cache_dir=model_args.cache_dir,
+    #             use_auth_token=True if model_args.use_auth_token else None,
+    #             streaming=data_args.streaming,
+    #         )
+    #         raw_datasets["train"] = load_dataset(
+    #             data_args.dataset_name,
+    #             data_args.dataset_config_name,
+    #             split=f"train[{data_args.validation_split_percentage}%:]",
+    #             cache_dir=model_args.cache_dir,
+    #             use_auth_token=True if model_args.use_auth_token else None,
+    #             streaming=data_args.streaming,
+    #         )
+    # else:
 
-        # If no validation data is there, validation_split_percentage will be used to divide the dataset.
-        if "validation" not in raw_datasets.keys():
-            raw_datasets["validation"] = load_dataset(
-                extension,
-                data_files=data_files,
-                split=f"train[:{data_args.validation_split_percentage}%]",
-                cache_dir=model_args.cache_dir,
-                use_auth_token=True if model_args.use_auth_token else None,
-            )
-            raw_datasets["train"] = load_dataset(
-                extension,
-                data_files=data_files,
-                split=f"train[{data_args.validation_split_percentage}%:]",
-                cache_dir=model_args.cache_dir,
-                use_auth_token=True if model_args.use_auth_token else None,
-            )
+    data_files = {}
+    if data_args.train_file is not None:
+        data_files["train"] = data_args.train_file
+    if data_args.validation_file is not None:
+        data_files["validation"] = data_args.validation_file
+
+    extension = "text"
+    logger.info("Loading text datasets")
+    raw_datasets = load_dataset(
+        extension,
+        data_files=data_files,
+        cache_dir=model_args.cache_dir,
+        use_auth_token=True if model_args.use_auth_token else None,
+    )
+    logger.info("Shuffling datasets")
+    raw_datasets["train"] = raw_datasets["train"].shuffle(
+        seed=training_args.seed
+    )
+
+    raw_datasets["validation"] = raw_datasets["validation"].shuffle(
+        seed=training_args.seed
+    )
+
+    # If no validation data is there, validation_split_percentage will be used to divide the dataset.
+    # if "validation" not in raw_datasets.keys():
+    #     raw_datasets["validation"] = load_dataset(
+    #         extension,
+    #         data_files=data_files,
+    #         split=f"train[:{data_args.validation_split_percentage}%]",
+    #         cache_dir=model_args.cache_dir,
+    #         use_auth_token=True if model_args.use_auth_token else None,
+    #     )
+    #     raw_datasets["train"] = load_dataset(
+    #         extension,
+    #         data_files=data_files,
+    #         split=f"train[{data_args.validation_split_percentage}%:]",
+    #         cache_dir=model_args.cache_dir,
+    #         use_auth_token=True if model_args.use_auth_token else None,
+    #     )
 
     # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
     # https://huggingface.co/docs/datasets/loading_datasets.html.
@@ -721,6 +732,7 @@ def main():
         preprocess_logits_for_metrics=preprocess_logits_for_metrics
         if training_args.do_eval and not is_torch_tpu_available()
         else None,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=20)],
     )
 
     # Training
