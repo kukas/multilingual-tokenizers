@@ -43,6 +43,7 @@ from transformers import (
     AutoModelForMaskedLM,
     AutoTokenizer,
     XLMRobertaTokenizer,
+    XLMRobertaTokenizerFast,
     DataCollatorForLanguageModeling,
     HfArgumentParser,
     Trainer,
@@ -55,6 +56,7 @@ from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
+import torch
 
 require_version(
     "datasets>=1.8.0",
@@ -436,6 +438,8 @@ def main():
     raw_datasets["train"] = raw_datasets["train"].shuffle(
         seed=training_args.seed
     )
+    logger.info("First sample from the training data")
+    logger.info(str(raw_datasets["train"][0]))
 
     raw_datasets["validation"] = raw_datasets["validation"].shuffle(
         seed=training_args.seed
@@ -497,9 +501,11 @@ def main():
         tokenizer = XLMRobertaTokenizer(model_args.sentencepiece_path)
         logger.info(f"Tokenizer vocab size: {len(tokenizer)}")
     elif model_args.tokenizer_name:
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_args.tokenizer_name, **tokenizer_kwargs
+        assert model_args.model_type == "xlm-roberta"
+        tokenizer = XLMRobertaTokenizerFast.from_pretrained(
+            model_args.tokenizer_name
         )
+        logger.info(f"Tokenizer vocab size: {len(tokenizer)}")
     elif model_args.model_name_or_path:
         tokenizer = AutoTokenizer.from_pretrained(
             model_args.model_name_or_path, **tokenizer_kwargs
@@ -509,7 +515,7 @@ def main():
             "You are instantiating a new tokenizer from scratch. This is not supported by this script."
             "You can do it from another script, save it, and load it from here, using --tokenizer_name."
         )
-
+    
     if model_args.model_name_or_path:
         model = AutoModelForMaskedLM.from_pretrained(
             model_args.model_name_or_path,
@@ -668,6 +674,9 @@ def main():
                     group_texts,
                     batched=True,
                 )
+    
+    logger.info("First sample from the training data")
+    logger.info(str(tokenized_datasets["train"][0]))
 
     if training_args.do_train:
         if "train" not in tokenized_datasets:
@@ -709,7 +718,7 @@ def main():
     # This one will take care of randomly masking the tokens.
     pad_to_multiple_of_8 = (
         data_args.line_by_line
-        and training_args.fp16
+        and (training_args.fp16 or training_args.bf16)
         and not data_args.pad_to_max_length
     )
     data_collator = DataCollatorForLanguageModeling(

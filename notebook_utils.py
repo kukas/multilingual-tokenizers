@@ -145,7 +145,6 @@ def open_lzma(path, max_docs):
 
 
 import numpy as np
-import nltk
 
 
 def compute_sorted_token_freqs(tokenized_text, vocabulary):
@@ -245,6 +244,7 @@ def compute_average_rank(probs):
 
 
 def word_tokenize_list(lines, language="english", preserve_line=False):
+    import nltk
     nltk.download("punkt")
     from nltk.tokenize import word_tokenize
 

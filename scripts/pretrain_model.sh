@@ -1,39 +1,38 @@
 #!/bin/bash
-#SBATCH --mem=64g
-#SBATCH --cpus-per-task=16
-#SBATCH --time=13-23
-#SBATCH -p gpu-troja,gpu-ms
-#SBATCH --constraint="gpuram40G|gpuram48G"
-#SBATCH --gres=gpu:3
-#SBATCH --mail-type=FAIL,TIME_LIMIT
-#SBATCH --mail-user=balhar.j@gmail.com
-#SBATCH --output=/home/balhar/my-luster/contextual-tokenizers/job_outputs/model_training/training_%j.out
-
+source ~/.bashrc
 set -eux
 
-export TRANSFORMERS_CACHE="/lnet/troja/work/people/balhar/cache/huggingface"
-export HF_DATASETS_CACHE="/lnet/troja/work/people/balhar/cache/huggingface/datasets"
-export HF_METRICS_CACHE="/lnet/troja/work/people/balhar/cache/huggingface/metrics"
+export TRANSFORMERS_CACHE="/scratch/project/open-26-22/balharj/cache/huggingface"
+export HF_DATASETS_CACHE="/scratch/project/open-26-22/balharj/cache/huggingface/datasets"
+export HF_METRICS_CACHE="/scratch/project/open-26-22/balharj/cache/huggingface/metrics"
 mkdir -p $TRANSFORMERS_CACHE
 
-cd /home/balhar/my-luster/contextual-tokenizers/src
+SCRIPT=$(realpath "$0")
+SCRIPTPATH=$(dirname "$SCRIPT")
+cd $SCRIPTPATH/../src
 
-python run_mlm.py \
+# activate conda for subshell execution
+CONDA_PATH=$(conda info | grep -i 'base environment' | awk '{print $4}')
+source $CONDA_PATH/etc/profile.d/conda.sh
+conda activate tokenizers
+
+torchrun --nproc_per_node 2 --nnodes 1 --rdzv_backend c10d --rdzv_endpoint localhost:0 run_mlm.py \
     --do_train --do_eval \
     --seed 42 \
     --model_type xlm-roberta \
     --max_seq_length 128 \
     --line_by_line \
     --per_device_train_batch_size 128 \
-    --gradient_accumulation_steps 16 \
+    --gradient_accumulation_steps 32 \
     --learning_rate 5e-4 \
-    --save_steps 1000 \
-    --eval_steps 1000 \
+    --save_steps 200 \
+    --eval_steps 200 \
     --fp16 \
-    --max_steps 15000 \
+    --torch_compile True \
+    --ddp_find_unused_parameters False \
+    --max_steps 10000 \
     --warmup_steps 500 \
     --load_best_model_at_end \
-    --warmup_ratio 0.01 \
     --eval_accumulation_steps 1 \
     --evaluation_strategy steps \
     --logging_steps 10 \
@@ -41,5 +40,5 @@ python run_mlm.py \
     --per_device_eval_batch_size 64 \
     --dataloader_num_workers 14 \
     --preprocessing_num_workers 14 \
-    --config_overrides "vocab_size=120002,hidden_size=512,num_hidden_layers=6,num_attention_heads=4,max_position_embeddings=130" \
-    "$@"
+    --config_overrides "vocab_size=120002,hidden_size=768,num_hidden_layers=8,num_attention_heads=6,max_position_embeddings=514" \
+    "$@" > ../scripts/logs/pretrain_model_$(date +'%Y%m%d-%H%M%S').log 2>&1
