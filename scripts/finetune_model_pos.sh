@@ -31,7 +31,7 @@ if [ "$1" = "--distributed" ]; then
     run_command="torchrun --nproc_per_node $num_gpus --nnodes 1 --rdzv_backend c10d --rdzv_endpoint localhost:0"
     shift
 else
-    run_command="python"
+    run_command="python -u"
 fi
 
 # next argument must be model_name_or_path
@@ -54,13 +54,14 @@ else
     exit 1
 fi
 
+export TOKENIZERS_PARALLELISM=false
 
 echo "task POS"
 echo "run_command $run_command"
 echo "rest of args $@"
 
-langs=("ar" "el" "en" "es" "tr" "zh" "hi" "mr" "ur" "ta" "te" "ru" "bg" "he" "vi" "fr" "de")
-names=("Arabic" "Greek" "English" "Spanish" "Turkish" "Chinese" "Hindi" "Marathi" "Urdu" "Tamil" "Telugu" "Russian" "Bulgarian" "Hebrew" "Vietnamese" "French" "German")
+langs=("en" "ar" "el" "es" "tr" "zh" "hi" "mr" "ur" "ta" "te" "ru" "bg" "he" "vi" "fr" "de")
+names=("English" "Arabic" "Greek" "Spanish" "Turkish" "Chinese" "Hindi" "Marathi" "Urdu" "Tamil" "Telugu" "Russian" "Bulgarian" "Hebrew" "Vietnamese" "French" "German")
 
 for (( j=0; j<${#langs[*]}; ++j)); do
     lang_src=${langs[$j]}

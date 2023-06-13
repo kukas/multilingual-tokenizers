@@ -31,7 +31,7 @@ if [ "$1" = "--distributed" ]; then
     run_command="torchrun --nproc_per_node $num_gpus --nnodes 1 --rdzv_backend c10d --rdzv_endpoint localhost:0"
     shift
 else
-    run_command="python"
+    run_command="python -u"
 fi
 
 # next argument must be model_name_or_path
@@ -59,33 +59,36 @@ echo "task XNLI"
 echo "run_command $run_command"
 echo "rest of args $@"
 
-langs=("ar" "bg" "de" "el" "en" "es" "fr" "hi" "ru" "sw" "th" "tr" "ur" "vi" "zh") # all XNLI languages
+langs=("en" "ar" "bg" "de" "el" "es" "fr" "hi" "ru" "sw" "th" "tr" "ur" "vi" "zh") # all XNLI languages
 
 for lang_src in ${langs[@]}
 do
     output_dir_lang=$output_dir/$lang_src
-    $run_command run_xnli.py \
-        --do_train \
-        --model_name_or_path $model_name_or_path \
-        --output_dir $output_dir_lang \
-        --language $lang_src \
-        --per_device_train_batch_size 768 \
-        --per_device_eval_batch_size 512 \
-        --learning_rate 5e-5 \
-        --num_train_epochs 3.0 \
-        --max_seq_length 128 \
-        --load_best_model_at_end \
-        --metric_for_best_model accuracy \
-        --save_steps 200 \
-        --eval_steps 200 \
-        --save_total_limit 1 \
-        --evaluation_strategy steps \
-        --eval_accumulation_steps 1 \
-        --fp16 \
-        --use_fast_tokenizer False \
-        --torch_compile True \
-        --dataloader_num_workers 16 \
-        "$@"
+
+    # skip if the model has already been trained
+    if [ ! -f "$output_dir_lang/pytorch_model.bin" ]; then
+        $run_command run_xnli.py \
+            --do_train \
+            --model_name_or_path $model_name_or_path \
+            --output_dir $output_dir_lang \
+            --language $lang_src \
+            --per_device_train_batch_size 512 \
+            --per_device_eval_batch_size 512 \
+            --learning_rate 5e-5 \
+            --num_train_epochs 3.0 \
+            --max_seq_length 128 \
+            --load_best_model_at_end \
+            --metric_for_best_model accuracy \
+            --save_steps 200 \
+            --eval_steps 200 \
+            --save_total_limit 1 \
+            --evaluation_strategy steps \
+            --eval_accumulation_steps 1 \
+            --fp16 \
+            --use_fast_tokenizer False \
+            --dataloader_num_workers 16 \
+            "$@"
+    fi
 
     echo "######################"
     echo "##### EVALUATION #####"
@@ -97,19 +100,22 @@ do
     do
         # now we use the finetuned model as the model_name_or_path 
         # output_dir is now the language-specific directory
-        $run_command run_xnli.py \
-            --do_eval \
-            --model_name_or_path $output_dir_lang \
-            --output_dir $output_dir_lang/$lang_tgt \
-            --language $lang_tgt \
-            --per_device_eval_batch_size 512 \
-            --max_seq_length 128 \
-            --eval_accumulation_steps 1 \
-            --fp16 \
-            --use_fast_tokenizer False \
-            --dataloader_num_workers 16 \
-            --report_to "none" \
-            "$@"
+        # skip if the language pair has already been evaluated
+        if [ ! -f "$output_dir_lang/$lang_tgt/eval_results.json" ]; then
+            $run_command run_xnli.py \
+                --do_eval \
+                --model_name_or_path $output_dir_lang \
+                --output_dir $output_dir_lang/$lang_tgt \
+                --language $lang_tgt \
+                --per_device_eval_batch_size 512 \
+                --max_seq_length 128 \
+                --eval_accumulation_steps 1 \
+                --fp16 \
+                --use_fast_tokenizer False \
+                --dataloader_num_workers 16 \
+                --report_to "none" \
+                "$@"
+        fi
     done
 
 done

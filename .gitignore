@@ -7,3 +7,6 @@ models/
 .ipynb_checkpoints/
 .vscode/
 __pycache__/
+src/wandb/
+scripts/stdin
+scripts/logs

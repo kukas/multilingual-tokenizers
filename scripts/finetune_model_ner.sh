@@ -31,7 +31,7 @@ if [ "$1" = "--distributed" ]; then
     run_command="torchrun --nproc_per_node $num_gpus --nnodes 1 --rdzv_backend c10d --rdzv_endpoint localhost:0"
     shift
 else
-    run_command="python"
+    run_command="python -u"
 fi
 
 # next argument must be model_name_or_path
@@ -54,6 +54,7 @@ else
     exit 1
 fi
 
+TOKENIZERS_PARALLELISM=false
 
 echo "task NER"
 echo "run_command $run_command"
@@ -63,28 +64,30 @@ langs=("en" "ar" "el" "es" "tr" "zh" "sw" "hi" "mr" "ur" "ta" "te" "th" "ru" "bg
 for lang_src in ${langs[@]}
 do
     output_dir_lang=$output_dir/$lang_src
-    $run_command run_ner.py \
-        --do_train \
-        --model_name_or_path $model_name_or_path \
-        --output_dir $output_dir_lang \
-        --dataset_name xtreme \
-        --dataset_config_name PAN-X.$lang_src \
-        --per_device_train_batch_size 512 \
-        --per_device_eval_batch_size 512 \
-        --learning_rate 5e-5 \
-        --num_train_epochs 5 \
-        --max_seq_length 128 \
-        --load_best_model_at_end \
-        --metric_for_best_model f1 \
-        --save_steps 60 \
-        --eval_steps 60 \
-        --save_total_limit 1 \
-        --evaluation_strategy steps \
-        --eval_accumulation_steps 1 \
-        --fp16 \
-        --dataloader_num_workers 16 \
-        "$@"
-
+    
+    if [ ! -f "$output_dir_lang/pytorch_model.bin" ]; then
+        $run_command run_ner.py \
+            --do_train \
+            --model_name_or_path $model_name_or_path \
+            --output_dir $output_dir_lang \
+            --dataset_name xtreme \
+            --dataset_config_name PAN-X.$lang_src \
+            --per_device_train_batch_size 512 \
+            --per_device_eval_batch_size 512 \
+            --learning_rate 5e-5 \
+            --num_train_epochs 5 \
+            --max_seq_length 128 \
+            --load_best_model_at_end \
+            --metric_for_best_model f1 \
+            --save_steps 60 \
+            --eval_steps 60 \
+            --save_total_limit 1 \
+            --evaluation_strategy steps \
+            --eval_accumulation_steps 1 \
+            --fp16 \
+            --dataloader_num_workers 16 \
+            "$@"
+    fi
     echo "######################"
     echo "##### EVALUATION #####"
     echo "######################"
@@ -93,18 +96,20 @@ do
     do
         # now we use the finetuned model as the model_name_or_path 
         # output_dir is now the language-specific directory
-        $run_command run_ner.py \
-            --do_eval \
-            --model_name_or_path $output_dir_lang \
-            --output_dir $output_dir_lang/$lang_tgt \
-            --dataset_name xtreme \
-            --dataset_config_name PAN-X.$lang_tgt \
-            --per_device_eval_batch_size 512 \
-            --max_seq_length 128 \
-            --eval_accumulation_steps 1 \
-            --fp16 \
-            --dataloader_num_workers 16 \
-            --report_to "none" \
-            "$@"
+        if [ ! -f "$output_dir_lang/$lang_tgt/eval_results.json" ]; then
+            $run_command run_ner.py \
+                --do_eval \
+                --model_name_or_path $output_dir_lang \
+                --output_dir $output_dir_lang/$lang_tgt \
+                --dataset_name xtreme \
+                --dataset_config_name PAN-X.$lang_tgt \
+                --per_device_eval_batch_size 512 \
+                --max_seq_length 128 \
+                --eval_accumulation_steps 1 \
+                --fp16 \
+                --dataloader_num_workers 16 \
+                --report_to "none" \
+                "$@"
+        fi
     done
 done

@@ -41,4 +41,4 @@ torchrun --nproc_per_node 2 --nnodes 1 --rdzv_backend c10d --rdzv_endpoint local
     --dataloader_num_workers 14 \
     --preprocessing_num_workers 14 \
     --config_overrides "vocab_size=120002,hidden_size=768,num_hidden_layers=8,num_attention_heads=6,max_position_embeddings=514" \
-    "$@" > ../scripts/logs/pretrain_model_$(date +'%Y%m%d-%H%M%S').log 2>&1
+    "$@" 2>&1 | tee ../scripts/logs/pretrain_model_$(date +'%Y%m%d-%H%M%S').log

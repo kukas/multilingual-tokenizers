@@ -34,6 +34,7 @@ import transformers
 from transformers import (
     AutoConfig,
     AutoModelForTokenClassification,
+    XLMRobertaForTokenClassification,
     AutoTokenizer,
     DataCollatorForTokenClassification,
     HfArgumentParser,
@@ -42,6 +43,7 @@ from transformers import (
     Trainer,
     TrainingArguments,
     set_seed,
+    EarlyStoppingCallback
 )
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
@@ -51,6 +53,87 @@ from transformers.utils.versions import require_version
 require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/token-classification/requirements.txt")
 
 logger = logging.getLogger(__name__)
+
+
+import torch
+from typing import Optional, Union, Tuple
+from transformers.modeling_outputs import TokenClassifierOutput
+from torch.nn import CrossEntropyLoss
+class XLMRobertaForTokenClassificationMean(XLMRobertaForTokenClassification):
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        token_type_ids: Optional[torch.LongTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        head_mask: Optional[torch.FloatTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        word_ids: Optional[torch.LongTensor] = None,
+    ) -> Union[Tuple[torch.Tensor], TokenClassifierOutput]:
+        r"""
+        labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+            Labels for computing the token classification loss. Indices should be in `[0, ..., config.num_labels - 1]`.
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        outputs = self.roberta(
+            input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        # print(input_ids)
+
+        sequence_output = outputs[0]
+
+        # slow method:
+        # sum_outputs = torch.zeros_like(sequence_output)
+        # count_outputs = torch.zeros_like(input_ids, dtype=torch.int32)
+        # for i in range(len(word_ids)):
+        #     for j in range(len(word_ids[i])):
+        #         new_j = word_ids[i][j]
+        #         sum_outputs[i, new_j] += sequence_output[i, j]
+        #         count_outputs[i, new_j] += 1
+        # mean_outputs = sum_outputs / count_outputs[:, :, None]
+
+        sum_matrix = torch.nn.functional.one_hot(word_ids, num_classes=sequence_output.shape[1]).type(torch.FloatTensor)
+        sum_matrix = sum_matrix.to(sequence_output.device)
+        sum_matrix = torch.transpose(sum_matrix, 1, 2)
+        sum_outputs = torch.bmm(sum_matrix, sequence_output)
+        count_outputs = torch.sum(sum_matrix, axis=2)
+        mean_outputs = sum_outputs / count_outputs[:, :, None]
+        mean_outputs[count_outputs == 0] = 0
+
+        sequence_output = self.dropout(sum_outputs)
+        logits = self.classifier(sequence_output)
+
+        loss = None
+        if labels is not None:
+            # move labels to correct device to enable model parallelism
+            labels = labels.to(logits.device)
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+
+        if not return_dict:
+            output = (logits,) + outputs[2:]
+            return ((loss,) + output) if loss is not None else output
+
+        return TokenClassifierOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
 
 
 @dataclass
@@ -89,7 +172,22 @@ class ModelArguments:
         default=False,
         metadata={"help": "Will enable to load a pretrained model whose head dimensions are different."},
     )
-
+    probe: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Train only a probe on top of the frozen model."
+            )
+        },
+    )
+    token_mean: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Compute mean over subword embeddings instead of taking the first value."
+            )
+        },
+    )
 
 @dataclass
 class DataTrainingArguments:
@@ -367,7 +465,10 @@ def main():
             use_auth_token=True if model_args.use_auth_token else None,
         )
 
-    model = AutoModelForTokenClassification.from_pretrained(
+    ModelClass = XLMRobertaForTokenClassification
+    if model_args.token_mean:
+        ModelClass = XLMRobertaForTokenClassificationMean
+    model = ModelClass.from_pretrained(
         model_args.model_name_or_path,
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
         config=config,
@@ -376,6 +477,11 @@ def main():
         use_auth_token=True if model_args.use_auth_token else None,
         ignore_mismatched_sizes=model_args.ignore_mismatched_sizes,
     )
+
+    if model_args.probe:
+        logger.info("Probing scenario: freezing the base model.")
+        for param in model.base_model.parameters():
+            param.requires_grad = False
 
     # Tokenizer check: this script requires a fast tokenizer.
     # if not isinstance(tokenizer, PreTrainedTokenizerFast):
@@ -429,18 +535,22 @@ def main():
             is_split_into_words=True,
         )
         labels = []
+        first_token_positions = []
         for i, label in enumerate(examples[label_column_name]):
             word_ids = tokenized_inputs.word_ids(batch_index=i)
             previous_word_idx = None
             label_ids = []
-            for word_idx in word_ids:
-                # Special tokens have a word id that is None. We set the label to -100 so they are automatically
+            first_token_pos = []
+            for j, word_idx in enumerate(word_ids):
+                # Spe: 0.009331259720062208, 'support': 1195}, 'X': {'precision': 0.0, 'recall': 0.0, 'f1-score': 0.0, 'support': 6}, 'accuracy': cial tokens have a word id that is None. We set the label to -100 so they are automatically
                 # ignored in the loss function.
                 if word_idx is None:
                     label_ids.append(-100)
+                    first_token_pos.append(j)
                 # We set the label for the first token of each word.
                 elif word_idx != previous_word_idx:
                     label_ids.append(label_to_id[label[word_idx]])
+                    first_token_pos.append(j)
                 # For the other tokens in a word, we set the label to either the current label or -100, depending on
                 # the label_all_tokens flag.
                 else:
@@ -448,10 +558,14 @@ def main():
                         label_ids.append(b_to_i_label[label_to_id[label[word_idx]]])
                     else:
                         label_ids.append(-100)
+                    first_token_pos.append(first_token_pos[-1])
                 previous_word_idx = word_idx
 
             labels.append(label_ids)
+            assert len(tokenized_inputs["input_ids"][i]) == len(first_token_pos)
+            first_token_positions.append(first_token_pos)
         tokenized_inputs["labels"] = labels
+        tokenized_inputs["word_ids"] = first_token_positions
         return tokenized_inputs
 
     if training_args.do_train:
@@ -506,7 +620,19 @@ def main():
     data_collator = DataCollatorForTokenClassification(tokenizer, pad_to_multiple_of=8 if training_args.fp16 else None)
 
     # Metrics
-    metric = evaluate.load("seqeval")
+    if data_args.task_name == "ner":
+        metric = evaluate.load("seqeval")
+        metric_name = "seqeval"
+    elif data_args.task_name == "pos":
+        if model_args.probe:
+            metric = evaluate.load("poseval")
+            metric_name = "poseval"
+        else:
+            # finetuning was evaluated with the seqeval, lets keep it like that
+            metric = evaluate.load("seqeval")
+            metric_name = "seqeval"
+    else:
+        raise KeyError(data_args.task_name)
 
     def compute_metrics(p):
         predictions, labels = p
@@ -534,13 +660,25 @@ def main():
                     final_results[key] = value
             return final_results
         else:
-            return {
-                "precision": results["overall_precision"],
-                "recall": results["overall_recall"],
-                "f1": results["overall_f1"],
-                "accuracy": results["overall_accuracy"],
-            }
+            if metric_name == "seqeval":
+               return {
+                    "precision": results["overall_precision"],
+                    "recall": results["overall_recall"],
+                    "f1": results["overall_f1"],
+                    "accuracy": results["overall_accuracy"],
+                }
+            elif metric_name == "poseval":
+                return {
+                    "precision": results["macro avg"]["precision"],
+                    "recall": results["macro avg"]["recall"],
+                    "f1": results["macro avg"]["f1-score"],
+                }
 
+    callbacks = []
+    if training_args.do_train:
+        callbacks.append(
+            EarlyStoppingCallback(early_stopping_patience=5, early_stopping_threshold=0.0)
+        )
     # Initialize our Trainer
     trainer = Trainer(
         model=model,
@@ -550,6 +688,7 @@ def main():
         tokenizer=tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics,
+        callbacks=callbacks
     )
 
     # Training

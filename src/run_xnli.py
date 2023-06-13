@@ -41,6 +41,7 @@ from transformers import (
     TrainingArguments,
     default_data_collator,
     set_seed,
+    EarlyStoppingCallback
 )
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
@@ -51,6 +52,138 @@ require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/text
 
 logger = logging.getLogger(__name__)
 
+
+from typing import Optional, Union, Tuple
+from transformers import (
+    XLMRobertaPreTrainedModel,
+    XLMRobertaModel,
+)
+from transformers.modeling_outputs import SequenceClassifierOutput
+
+import torch
+from torch import nn
+import logging
+
+
+class XLMRobertaXNLIHead(nn.Module):
+    """Head for sentence-level classification tasks."""
+
+    def __init__(self, config):
+        super().__init__()
+        self.out_proj = nn.Linear(config.hidden_size * 3, config.num_labels)
+
+    def forward(self, mean_a, mean_b, **kwargs):
+        features = torch.cat((mean_a, mean_b, mean_a * mean_b), dim=1)
+        x = self.out_proj(features)
+        return x
+
+
+# Copied from transformers.models.roberta.modeling_roberta.RobertaForSequenceClassification with Roberta->XLMRoberta, ROBERTA->XLM_ROBERTA
+class XLMRobertaForXNLI(XLMRobertaPreTrainedModel):
+    _keys_to_ignore_on_load_missing = [r"position_ids"]
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.num_labels = config.num_labels
+        self.config = config
+
+        self.roberta = XLMRobertaModel(config, add_pooling_layer=False)
+        self.classifier = XLMRobertaXNLIHead(config)
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    def compute_sentence_embeddings(self, input_ids, attention_mask):
+        outputs = self.roberta(
+            input_ids,
+            attention_mask=attention_mask,
+            return_dict=True,
+        )
+        # the format of features is (batch_size, seq_len, hidden_size)
+        masked_features = outputs[0] * attention_mask.unsqueeze(-1)
+        num_tokens = torch.sum(
+            attention_mask, dim=1, keepdim=True
+        )
+        if torch.min(num_tokens) == 0:
+            logging.warning("Found a sequence with no tokens")
+            num_tokens = torch.max(num_tokens, torch.ones_like(num_tokens))
+        masked_mean = torch.sum(masked_features, dim=1) / num_tokens
+
+        return masked_mean
+
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        token_type_ids: Optional[torch.LongTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        head_mask: Optional[torch.FloatTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        premise_embedding: Optional[torch.FloatTensor] = None,
+        hypothesis_embedding: Optional[torch.FloatTensor] = None,
+    ) -> Union[Tuple[torch.Tensor], SequenceClassifierOutput]:
+        r"""
+        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
+            Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
+            config.num_labels - 1]`. A classification loss is computed (Cross-Entropy).
+        """
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
+
+        if premise_embedding is None or hypothesis_embedding is None:
+            assert input_ids is not None
+
+            # split input_ids into two parts
+            # find the first occurence of the separator token
+            sep_token_id = 2  # TODO: do not hardcode this
+            # we have input_ids shape (batch_size, seq_len) eg (16, 126)
+            # for each sequence we find the separator tokens
+            is_sep = (input_ids == sep_token_id).type(torch.uint8)
+            sep_indices = is_sep.argmax(dim=1)
+
+            sep_indices += 1  # add one to account for the separator token
+            input_ids_a = torch.ones_like(input_ids)
+            attention_mask_a = torch.zeros_like(attention_mask)
+            input_ids_b = torch.ones_like(input_ids)
+            attention_mask_b = torch.zeros_like(attention_mask)
+            for i, j in enumerate(sep_indices):
+                # extract the first part of the sequence batch
+                input_ids_a[i, :j] = input_ids[i, :j]
+                attention_mask_a[i, :j] = 1
+                # extract the second part of the sequence batch
+                input_ids_b[i, : input_ids.shape[1] - j] = input_ids[i, j:]
+                input_ids_b[i, 0] = 0  # TODO: do not hardcode this
+                attention_mask_b[i, : input_ids.shape[1] - j] = attention_mask[i, j:]
+
+            premise_embedding = self.compute_sentence_embeddings(
+                input_ids_a, attention_mask_a
+            )
+            hypothesis_embedding = self.compute_sentence_embeddings(
+                input_ids_b, attention_mask_b
+            )
+
+        logits = self.classifier(premise_embedding, hypothesis_embedding)
+        loss = None
+        if labels is not None:
+            loss_fct = nn.CrossEntropyLoss()
+            loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+
+        if not return_dict:
+            output = (logits,) + outputs[2:]
+            return ((loss,) + output) if loss is not None else output
+
+        output = SequenceClassifierOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=None,
+            attentions=None,
+        )
+        return output
 
 @dataclass
 class DataTrainingArguments:
@@ -73,6 +206,13 @@ class DataTrainingArguments:
     )
     overwrite_cache: bool = field(
         default=False, metadata={"help": "Overwrite the cached preprocessed datasets or not."}
+
+    )
+    keep_in_memory: bool = field(
+        default=False,
+        metadata={
+            "help": "Keep the dataset in memory instead of writing it to a cache file."
+        },
     )
     pad_to_max_length: bool = field(
         default=True,
@@ -124,6 +264,15 @@ class ModelArguments:
     language: str = field(
         default=None, metadata={"help": "Evaluation language. Also train language if `train_language` is set to None."}
     )
+    precompute_model_outputs: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Precompute the model outputs for the dataset and cache them. Makes sense only for probing."
+            )
+        },
+    )
+
     train_language: Optional[str] = field(
         default=None, metadata={"help": "Train language if it is different from the evaluation language."}
     )
@@ -162,7 +311,22 @@ class ModelArguments:
         default=False,
         metadata={"help": "Will enable to load a pretrained model whose head dimensions are different."},
     )
-
+    probe: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Train only a probe on top of the frozen model."
+            )
+        },
+    )
+    use_custom_head: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Use a custom head for the probe."
+            )
+        },
+    )
 
 def main():
     # See all possible arguments in src/transformers/training_args.py
@@ -171,10 +335,6 @@ def main():
 
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-
-    # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
-    # information sent is the one passed as arguments along with your Python/PyTorch versions.
-    send_example_telemetry("run_xnli", model_args)
 
     # Setup logging
     logging.basicConfig(
@@ -285,15 +445,36 @@ def main():
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
-    model = AutoModelForSequenceClassification.from_pretrained(
-        model_args.model_name_or_path,
-        from_tf=bool(".ckpt" in model_args.model_name_or_path),
-        config=config,
-        cache_dir=model_args.cache_dir,
-        revision=model_args.model_revision,
-        use_auth_token=True if model_args.use_auth_token else None,
-        ignore_mismatched_sizes=model_args.ignore_mismatched_sizes,
-    )
+    logger.info(f"First 10 vocab tokens: {list(tokenizer.get_vocab().keys())[:10]}")
+    if model_args.use_custom_head:
+        model = XLMRobertaForXNLI.from_pretrained(
+            model_args.model_name_or_path,
+            from_tf=bool(".ckpt" in model_args.model_name_or_path),
+            config=config,
+            cache_dir=model_args.cache_dir,
+            revision=model_args.model_revision,
+            use_auth_token=True if model_args.use_auth_token else None,
+            ignore_mismatched_sizes=model_args.ignore_mismatched_sizes,
+        )
+    else:
+        model = AutoModelForSequenceClassification.from_pretrained(
+            model_args.model_name_or_path,
+            from_tf=bool(".ckpt" in model_args.model_name_or_path),
+            config=config,
+            cache_dir=model_args.cache_dir,
+            revision=model_args.model_revision,
+            use_auth_token=True if model_args.use_auth_token else None,
+            ignore_mismatched_sizes=model_args.ignore_mismatched_sizes,
+        )
+
+    if model_args.precompute_model_outputs:
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        model.to(device)
+
+    if model_args.probe:
+        logger.info("Probing scenario: freezing the base model.")
+        for param in model.base_model.parameters():
+            param.requires_grad = False
 
     # Preprocessing the datasets
     # Padding strategy
@@ -304,25 +485,57 @@ def main():
         padding = False
 
     def preprocess_function(examples):
-        # Tokenize the texts
-        return tokenizer(
-            examples["premise"],
-            examples["hypothesis"],
-            padding=padding,
-            max_length=data_args.max_seq_length,
-            truncation=True,
-        )
+
+        # Precompute the sentence embeddings
+        if model_args.precompute_model_outputs:
+            # print("Precomputing the model outputs")
+            # Precompute the sentence embeddings for the premise and hypothesis
+            inputs = {
+                "premise_embedding": examples["premise"],
+                "hypothesis_embedding": examples["hypothesis"],
+            }
+            # First tokenize the texts
+            for k, v in inputs.items():
+                inputs[k] = tokenizer(
+                    v,
+                    padding=True,
+                    max_length=data_args.max_seq_length,
+                    truncation=True,
+                    return_tensors="pt",
+                )
+            # Then compute the sentence embeddings
+            with torch.no_grad():
+                model.eval()
+                for k, v in inputs.items():
+                    input_ids = v["input_ids"]
+
+                    inputs[k] = model.compute_sentence_embeddings(
+                        input_ids=input_ids.to(device),
+                        attention_mask=v["attention_mask"].to(device),
+                    )
+            return inputs
+        else:
+            # Tokenize the texts
+            return tokenizer(
+                examples["premise"],
+                examples["hypothesis"],
+                padding=padding,
+                max_length=data_args.max_seq_length,
+                truncation=True,
+            )
 
     if training_args.do_train:
         if data_args.max_train_samples is not None:
             max_train_samples = min(len(train_dataset), data_args.max_train_samples)
             train_dataset = train_dataset.select(range(max_train_samples))
         with training_args.main_process_first(desc="train dataset map pre-processing"):
-            train_dataset = train_dataset.map(
+            train_dataset = train_dataset.map(lambda ex: {"premise_len": len(ex["premise"])}).sort("premise_len").map(
                 preprocess_function,
                 batched=True,
                 load_from_cache_file=not data_args.overwrite_cache,
+                keep_in_memory=data_args.keep_in_memory,
                 desc="Running tokenizer on train dataset",
+                batch_size=1000,
             )
         # Log a few random samples from the training set:
         for index in random.sample(range(len(train_dataset)), 3):
@@ -337,6 +550,7 @@ def main():
                 preprocess_function,
                 batched=True,
                 load_from_cache_file=not data_args.overwrite_cache,
+                keep_in_memory=data_args.keep_in_memory,
                 desc="Running tokenizer on validation dataset",
             )
 
@@ -349,6 +563,7 @@ def main():
                 preprocess_function,
                 batched=True,
                 load_from_cache_file=not data_args.overwrite_cache,
+                keep_in_memory=data_args.keep_in_memory,
                 desc="Running tokenizer on prediction dataset",
             )
 
@@ -370,6 +585,12 @@ def main():
     else:
         data_collator = None
 
+    callbacks = []
+    if training_args.do_train:
+        callbacks.append(
+            EarlyStoppingCallback(early_stopping_patience=10, early_stopping_threshold=0.0)
+        )
+
     # Initialize our Trainer
     trainer = Trainer(
         model=model,
@@ -379,6 +600,8 @@ def main():
         compute_metrics=compute_metrics,
         tokenizer=tokenizer,
         data_collator=data_collator,
+        callbacks=callbacks,
+        
     )
 
     # Training
